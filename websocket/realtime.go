@@ -17,7 +17,10 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-const customMessageMaxSize = 10240
+const (
+	customMessageMaxSize        = 10240
+	defaultCustomMessageMaxSize = 256 * 1024
+)
 
 // RealtimeHandler represents a service that manages multiple client connections
 // and relays their actions in realtime.
@@ -39,6 +42,8 @@ type RealtimeHandler struct {
 	Modules []modules.Module
 
 	FeatureFlags featureflag.FeatureFlag
+
+	CustomMessageMaxSize int
 
 	// channel for sending incoming receipts to ReceiptHandler goroutine
 	ReceiptChan chan ncsclient.ReceiptPayload
@@ -423,7 +428,12 @@ func (h *RealtimeHandler) HandleCustomMessage(ctx context.Context, respond hwebs
 			WithTag("msg_type", msg.Type)
 	}
 
-	if len(customMessage.Body) > customMessageMaxSize {
+	maxSize := h.CustomMessageMaxSize
+	if maxSize == 0 {
+		maxSize = defaultCustomMessageMaxSize
+	}
+
+	if len(customMessage.Body) > maxSize {
 		respond.Send(&hagallpb.ErrorResponse{
 			Type:      hagallpb.MsgType_MSG_TYPE_ERROR_RESPONSE,
 			Timestamp: timestamppb.Now(),
@@ -432,21 +442,23 @@ func (h *RealtimeHandler) HandleCustomMessage(ctx context.Context, respond hwebs
 		return nil
 	}
 
-	h.FeatureFlags.IfNotSet(featureflag.FlagDisableCustomMessageBroadcast, func() {
-		customMessageBroadcast := hagallpb.CustomMessageBroadcast{
-			Type:            hagallpb.MsgType_MSG_TYPE_CUSTOM_MESSAGE_BROADCAST,
-			Timestamp:       timestamppb.Now(),
-			OriginTimestamp: customMessage.Timestamp,
-			ParticipantId:   participant.ID,
-			Body:            customMessage.Body,
-		}
+	h.FeatureFlags.IfNotSet(featureflag.FlagDisableRosTopicRelay, func() {
+		h.FeatureFlags.IfNotSet(featureflag.FlagDisableCustomMessageBroadcast, func() {
+			customMessageBroadcast := hagallpb.CustomMessageBroadcast{
+				Type:            hagallpb.MsgType_MSG_TYPE_CUSTOM_MESSAGE_BROADCAST,
+				Timestamp:       timestamppb.Now(),
+				OriginTimestamp: customMessage.Timestamp,
+				ParticipantId:   participant.ID,
+				Body:            customMessage.Body,
+			}
 
-		if len(customMessage.ParticipantIds) != 0 {
-			session.BroadcastTo(participant, &customMessageBroadcast, customMessage.ParticipantIds...)
-			return
-		}
+			if len(customMessage.ParticipantIds) != 0 {
+				session.BroadcastTo(participant, &customMessageBroadcast, customMessage.ParticipantIds...)
+				return
+			}
 
-		session.Broadcast(participant, &customMessageBroadcast)
+			session.Broadcast(participant, &customMessageBroadcast)
+		})
 	})
 	return nil
 }
